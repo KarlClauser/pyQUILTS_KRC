@@ -35,10 +35,14 @@ from datetime import datetime
 from subprocess import call, check_call, CalledProcessError
 import warnings
 from exonSearchTree import ExonSearchTree
-from string import maketrans
+#from string import maketrans
+#from str import maketrans
 import re
-from sets import Set
+#from sets import Set
 from itertools import product
+
+#sREAD_CHR_BED_EEXECUTABLE = '/read_chr_bed'          #Unix
+sREAD_CHR_BED_EEXECUTABLE = 'read_chr_bed_win64.exe' #Windows
 
 # ahhhh look at these hideous global variables
 global logfile
@@ -57,6 +61,7 @@ def parse_input_arguments():
 	# full paths are a pain but they're more flexible.
 	# Also, at some point, make some of these arguments not optional.
 	parser = argparse.ArgumentParser(description="QUILTS") # What even is this description for, anyway? Maybe I'll remove it eventually
+	parser.add_argument('--sample_manifest_junction', type=str, default="", help="sample manifest for mapping input file to output file")
 	parser.add_argument('--output_dir', type=str, default=".", help="full path to output folder (defaults to .)")
 	parser.add_argument('--proteome', type=str, required=True, help="full path to folder containing reference proteome (required)")
 	parser.add_argument('--genome', type=str, required=True, help="full path to folder containing reference genome (required)")
@@ -64,6 +69,7 @@ def parse_input_arguments():
 	parser.add_argument('--somatic',type=str, help="full path to folder containing somatic variant VCF file(s)")
 	parser.add_argument('--junction', type=str, help="full path to folder containing junction file(s)")
 	parser.add_argument('--junction_file_type', choices=['mapsplice','tophat','star'], default='mapsplice', help="which program was used to generate your junction files (options are mapsplice, star, tophat) (defaults to mapsplice)")
+	parser.add_argument('--junction_skipNovels', type=bool, default=False, help="if true export only bothConserved and donorConserved junctions")
 	parser.add_argument('--fusion', type=str, help="full path to folder containing fusion file")
 	parser.add_argument('--threshB', type=int, default=2, help="read support threshold for junctions with both exon boundaries annotated (default=2)")
 	parser.add_argument('--threshD', type=int, default=3, help="read support threshold for junctions with only donor exon boundary annotated (default=3)")
@@ -196,10 +202,25 @@ def merge_and_qual_filter(vcf_dir, quality_threshold):
 		warnings.warn("Unable to find any .vcf files in %s" % vcf_dir)
 		return 1
 
+	merge_and_qual_filter_vcf(vcf_files, vcf_dir, vcf_dir, quality_threshold)
+
+	return None
+
+#KRC 1/22/2024 split so possible separate directories for inputs and intermediates from processing
+#merge_and_qual_filter			bypass this
+#merge_and_qual_filter_vcf		supply file list and 2 dirs
+
+def merge_and_qual_filter_vcf(vcf_files, sVCFinDir, vcf_dir, quality_threshold):
+
+	#make merged subdir,if bypassing merge_and_qual_filter
+	sMergedDir = vcf_dir+"/merged_pytest"
+	if not os.path.isdir(sMergedDir):
+		os.makedirs(sMergedDir)
+
 	# Cool, we have a valid file, let's open our log and output files.
-	vcf_log_location = vcf_dir+'/merged_pytest/merged.log'
-	vcf_log = open(vcf_log_location,'w')
-	w = open(vcf_dir+'/merged_pytest/merged.vcf','w')
+	vcf_log_location = sMergedDir + '/merged.log'
+	vcf_log = open(vcf_log_location,'w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
+	w = open(sMergedDir + '/merged.vcf','w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
 	w.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\n")	
 	
 
@@ -212,7 +233,9 @@ def merge_and_qual_filter(vcf_dir, quality_threshold):
 	existing_variants = {}
 
 	for vf in vcf_files:
-		f = open(vcf_dir+'/'+vf, 'r')
+		#f = open(vcf_dir+'/'+vf, 'r')
+		f = open(sVCFinDir+'/'+vf, 'r')	#KRC 1/22/2024 alternate directory to where intermediate results will reside
+
 		write_to_log(vcf_dir+'/'+vf, vcf_log_location)
 		
 		# I read one line at a time instead of going with f.readlines() because
@@ -250,7 +273,7 @@ def merge_and_qual_filter(vcf_dir, quality_threshold):
 			# Also, if there's no QUAL, will it always be a dot? If not, we need to figure out how to deal
 			# If there's no QUAL and there's a dot, make it just over the threshold.
 			try:
-				if spline[5].rstrip() == '.':
+				if spline[5].rstrip() in (None, '',  '.'):
 					spline[5] = str(quality_threshold+.01)
 				chr, pos, id, old, new_array, qual = spline[0].lstrip('chr'), int(spline[1])-1, spline[2], spline[3], spline[4].split(','), eval(spline[5])
 			except ValueError:
@@ -305,13 +328,17 @@ def merge_and_qual_filter(vcf_dir, quality_threshold):
 	return None
 
 ### This function saves the proteome as a map for quality checks.
-def save_ref_prot(ref_prot_loc):
+def save_ref_prot(ref_prot_loc, bTroubleshooting = False):
 	'''This function saves the proteome as a map for quality checks.'''
 	ref_prot = {}
 	f = open(ref_prot_loc,'r')
 	header = f.readline()
 	seq = ''
 	line = f.readline()
+	if bTroubleshooting:	#KRC 1/27/2024
+		print('Reading reference proteome\n', ref_prot_loc)
+		print('first header', header)
+		print('first acc num', header.split()[0].split('.')[0][1:])
 	while line:
 		if line[0] == '>':
 			ref_prot[header.split()[0].split('.')[0][1:]] = seq
@@ -322,6 +349,12 @@ def save_ref_prot(ref_prot_loc):
 			seq += line.rstrip()
 			line = f.readline()
 	ref_prot[header.split()[0].split('.')[0][1:]] = seq # the last one
+	if bTroubleshooting:	#KRC 1/27/2024
+		print('last header', header)
+		print('last acc num', header.split()[0].split('.')[0][1:])
+		print('last acc seq', seq)
+	#sys.exit(0)
+
 	return ref_prot
 
 ### This function removes any duplicate germline or somatic variants from the somatic file.
@@ -350,7 +383,7 @@ def remove_somatic_duplicates(germ_dir, som_dir):
 		line = f.readline()
 	f.close()
 	
-	w = open(som_dir+'/merged_pytest/temp.vcf','w')
+	w = open(som_dir+'/merged_pytest/temp.vcf','w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
 	f = open(som_dir+'/merged_pytest/merged.vcf','r')
 	duplicates_found = 0
 	kept_variants = 0
@@ -388,7 +421,8 @@ def get_variants(vcf_file, proteome_file, type):
 	# QUESTION: In the original, it appears that in proteome.bed.var the pos-- doesn't happen? Why?
 	# Also, somatic hasn't been filtered yet at this step in the original. I think it should be okay that that's changed here - 
 	# the earlier you filter it, the faster the other steps are.
-	
+
+	#KRC set up the exon search tree from proteome.bed
 	est = ExonSearchTree()
 	line = f.readline() # Going to assume no headers for now
 	all_names = set([])
@@ -415,12 +449,16 @@ def get_variants(vcf_file, proteome_file, type):
 			est.add_exon(chr, int(spoffsets[i])+start, int(spoffsets[i])+start+int(splengths[i])-1, total_exon_length, name)	
 			total_exon_length += int(splengths[i])		
 		line = f.readline()
-	#print est.total_exons
+	print(est.total_exons, 'Total exons found for ', proteome_file)
 	f.close()
+	#sys.exit(0)
 
+	#go through the .vcf file and checks if they're in any exons
 	f = open(vcf_file, 'r')
 	line = f.readline() # Still assuming no headers
 	all_genes = {}
+	iNumExonsFound = 0
+	iVariantsChecked = 0
 	while line:
 		if line[0] == '#':
 			line = f.readline()
@@ -441,8 +479,10 @@ def get_variants(vcf_file, proteome_file, type):
 			old = ''
 		if new == '.' or new == '-':
 			new = ''
+		iVariantsChecked += 1
 		exon = est.find_exon(chr,pos)
 		if exon != []:
+			iNumExonsFound += 1
 			# Save pos in chr and pos in gene
 			# Each exon returned is a [name, position in gene] pair
 			for ex in exon:
@@ -455,10 +495,11 @@ def get_variants(vcf_file, proteome_file, type):
 					all_genes[ex[0]].append([in_chr, in_gene])
 		line = f.readline()
 	f.close()
+	print(iVariantsChecked, ' variants checked in exon search tree, found :', iNumExonsFound)
 
 	# Write variants out to file.
 	# Need to let it write genes with no variants, also.
-	w = open(proteome_file+"."+type+".var", 'w')	
+	w = open(proteome_file+"."+type+".var", 'w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
 	for key in all_names:
 		in_chr = []
 		in_gene = []
@@ -481,9 +522,13 @@ def valid_nucleotides(strg, search=re.compile(r'[^ACGTU\.\-.]').search):
 
 ### These functions are used to sort variants by type.
 
-def process_gene(header_line, second_header, exon_headers, exon_seqs, variants, ref_prot):
+#KRC 1/27/2024 removed unused arguments
+#def process_gene(header_line, second_header, exon_headers, exon_seqs, variants, ref_prot):
+def process_gene(header_line, exon_seqs, variants, ref_prot):
 	'''Checks all variants in a gene for whether or not they cause a single-AA non-stop substitution. 
 	Returns a list of the ones that do, and the AA substitutions they cause.'''
+	bTroubleShooting = False
+
 	global codon_map
 	global logfile
 	global referrorfile
@@ -493,12 +538,17 @@ def process_gene(header_line, second_header, exon_headers, exon_seqs, variants, 
 	indels = []
 	indel_substs = []
 
+	#KRC 1/27/2024 premature exit handles when proteome.bed.dna (created from BioMart export ) has extra proteins that were filtered out when making the reference proteome
 	if header_line.split('\t')[3] not in ref_prot.keys():
-		write_to_log("Protein %s not found in reference, skipping..." % header_line.split('\t')[3], referrorfile)
+		#write_to_log("Protein %s not found in reference, skipping..." % header_line.split('\t')[3], referrorfile)
+		write_to_log("Protein %s not found in reference, skipping..." % header_line.split('\t')[3] + ' ref prot key 0: ' + list(ref_prot.keys())[0], referrorfile) #KRC 1/24/2024
+		#sys.exit(1)
 		return changes, aa_substs, indels
+	#else:
+	#	print('Protein %s in reference ' % header_line.split('\t')[3]) #KRC 1/24/2024 troubleshooting
 
 	# Ready the translation table for the reverse strand.
-	translate_table = maketrans("ACGTacgt","TGCAtgca")
+	translate_table = str.maketrans("ACGTacgt","TGCAtgca")
 	
 	# For each variant in our variants, check if it will become an AA substitution.
 	# Do I check only a single reading frame? That's what they did. 
@@ -516,7 +566,7 @@ def process_gene(header_line, second_header, exon_headers, exon_seqs, variants, 
 	if '0' in full_seq  or 'N' in full_seq:
 		write_to_log(header_line+full_seq, logfile)
 		return changes, aa_substs, indels
-	
+
 	prev_start = -1 # Previous codon start position
 	prev_subst = [-1, ''] # Previous substitution position and nucleotide
 	for var in variants:
@@ -540,15 +590,17 @@ def process_gene(header_line, second_header, exon_headers, exon_seqs, variants, 
 			else:
 				indels.append(var)
 			continue
-		
-		triplet_start = ((pos/3)*3) # start of the triplet containing pos. counting from 0, not 1
+
+		#KRC 1/27/2024  divide by to round down to count of AA's, multiply to get back to NT coordinate of codon's triple start
+		#triplet_start = ((pos/3)*3) # start of the triplet containing pos. counting from 0, not 1
+		triplet_start = int(pos/3)*3 #KRC 1/27/2024 Fix TypeError: slice indices must be integers or None or have an __index__ method
 		triplet_orig = full_seq[triplet_start:(triplet_start+3)].upper()
 		triplet_subst = var.split(':')[0].split(str(pos))[-1]
 		if triplet_orig == '':
-			print '\n'+'Empty codon: '+var, full_seq, len(full_seq), triplet_start, header_line
+			print ('\n'+'Empty codon: '+var, full_seq, len(full_seq), triplet_start, header_line)
 			continue
 		if len(triplet_orig) != 3:
-			print '\n'+'Triplet with length <3 (length of sequence likely not divisible by 3, for whatever reason): '+var, full_seq, len(full_seq), triplet_start, header_line
+			print ('\n'+'Triplet with length <3 (length of sequence likely not divisible by 3, for whatever reason): '+var, full_seq, len(full_seq), triplet_start, header_line)
 			continue
 		subst_pos = pos%3
 		triplet_new = triplet_orig[:subst_pos] + triplet_subst + triplet_orig[subst_pos+1:] # This did! change it in both.
@@ -570,24 +622,36 @@ def process_gene(header_line, second_header, exon_headers, exon_seqs, variants, 
 		# count it!
 		#if AA_old != AA_new and AA_new != '*' and AA_old != '*':
 		# Now we're just checking whether the old and new AAs are different. Leaving stop codon things in...
+		if bTroubleShooting:	print('Strand, Mutate, translate change', reverse_flag, triplet_start, subst_pos, pos, orig_nt, new_nt, triplet_orig, triplet_new, AA_old, AA_new)
 		if AA_old != AA_new:
 			if reverse_flag:
-				total_AA = len(full_seq)/3
-				position = total_AA-(pos/3)
+				#total_AA = len(full_seq)/3
+				total_AA = int(len(full_seq)/3) #KRC 1/27/2024 Fix string indices must be integers
+				#position = total_AA-(pos/3)
+				position = total_AA-int(pos/3) #KRC 1/27/2024 Fix string indices must be integers
 			else:
-				position = pos/3+1
-			
+				#position = pos/3+1
+				position = int(pos/3) + 1  #KRC 1/27/2024 Fix string indices must be integers
+
+			if bTroubleShooting:	print('AA position', position, ' prot length', len(ref_prot[header_line.split('\t')[3]]))
+
 			try:
 				orig_seq = ref_prot[header_line.split('\t')[3]]
-				orig_aa = orig_seq[position-1]
-				if orig_aa == AA_old:
-					changes.append(var)
-					aa_substs.append((AA_old, position, AA_new))
-				elif (AA_old=='*') and (orig_aa in 'EOQUW') and (orig_aa != AA_new):
-					changes.append(var)
-					aa_substs.append((orig_aa, position, AA_new))
+				iOrig_seq_length = len(orig_seq)
+				if position-1 < iOrig_seq_length: #KRC 1/28/2024 added check for reference proteome preparation
+					orig_aa = orig_seq[position-1]
+					if bTroubleShooting:	print('DNA vs protein retrieval', position-1 , AA_old, orig_aa)
+					if orig_aa == AA_old:
+						changes.append(var)
+						aa_substs.append((AA_old, position, AA_new))
+					elif (AA_old=='*') and (orig_aa in 'EOQUW') and (orig_aa != AA_new):
+						changes.append(var)
+						aa_substs.append((orig_aa, position, AA_new))
+					else:
+						write_to_log("Original AA at position %d in %s not what we expected [expected %s, found %s], skipping..." % (position, header_line.split('\t')[3], AA_old, orig_seq[position-1]), referrorfile)
 				else:
-					write_to_log("Original AA at position %d in %s not what we expected [expected %s, found %s], skipping..." % (position, header_line.split('\t')[3], AA_old, orig_seq[position-1]), referrorfile)
+					write_to_log("%s protein length %d too short for mutation position %d, skipping..." % (header_line.split('\t')[3], iOrig_seq_length, position), referrorfile)
+					continue
 			#except KeyError:
 			#	write_to_log("Protein %s not found in reference, skipping..." % header_line.split('\t')[3], referrorfile)
 			except IndexError:
@@ -596,12 +660,13 @@ def process_gene(header_line, second_header, exon_headers, exon_seqs, variants, 
 					changes.append(var)
 					aa_substs.append((AA_old, position, AA_new))
 				else:
-					write_to_log("Protein %s not expected length, skipping..." % header_line.split('\t')[3], referrorfile)
+					write_to_log("Protein %s not expected length, skipping..." % (header_line.split('\t')[3]), referrorfile)
 
 		# If the new codon is a stop codon, 
 		# uh...I found this comment here and it looks like I decided not to do whatever I was planning to do.
 		
 		# Check to see if this is the second substitution in a codon - if so, does the amino acid change with both?
+		if bTroubleShooting:	print('prev_start, triplet_start', prev_start, triplet_start)
 		if prev_start == triplet_start:
 			triplet_orig = full_seq[triplet_start:(triplet_start+3)].upper()
 			triplet_new = list(triplet_orig)
@@ -620,11 +685,14 @@ def process_gene(header_line, second_header, exon_headers, exon_seqs, variants, 
 				# Make this somatic or germline, whichever the most recent variant was. Could conceivably do this better
 				if reverse_flag:
 					change = "%s-%s%d%s:0.0" % (var.split('-')[0],triplet_orig[::-1].translate(translate_table), triplet_start, triplet_new[::-1].translate(translate_table))
-					total_AA = len(full_seq)/3
-					position = total_AA-(pos/3)
+					#total_AA = len(full_seq)/3
+					#position = total_AA-(pos/3)
+					total_AA = int(len(full_seq)/3) #KRC 1/27/2024 fix float to int
+					position = total_AA-int(pos/3) #KRC 1/27/2024 fix float to int
 				else:
 					change = "%s-%s%d%s:0.0" % (var.split('-')[0],triplet_orig, triplet_start, triplet_new)
-					position = pos/3+1
+					#position = pos/3+1
+					position = int(pos/3+1) #KRC 1/27/2024 fix float to int
 				try:
 					orig_seq = ref_prot[header_line.split('\t')[3]]
 					orig_aa = orig_seq[position-1]
@@ -651,7 +719,9 @@ def process_gene(header_line, second_header, exon_headers, exon_seqs, variants, 
 
 		prev_start = triplet_start
 		prev_subst = [subst_pos, triplet_subst]
-	return changes, aa_substs, indels	
+		if bTroubleShooting and len(changes) == 0:
+			print('No Change ', AA_old, AA_new)
+	return changes, aa_substs, indels
 	
 def write_out_aa(name, changed_vars, aa_substs, out_aa):
 	'''Creates the proteome.bed.aa.var file, which is just a list of all variants in the style of proteome.bed.var.'''
@@ -765,7 +835,7 @@ def write_out_indel_bed_dna(header_line, second_header, exon_headers, indels, ou
 					try:
 						write_to_status("Found a deletion that goes beyond the exon. %s\t%s" % (ex_head[0], indel))
 					except OSError:
-						print "Found a very strange deletion: " + '\t'.join(ex_head) + '\t' + indel
+						print ("Found a very strange deletion: " + '\t'.join(ex_head) + '\t' + indel)
 				tmp_ex_head = ex_head
 				tmp_ex_head[4] = str(new_length)
 				ex_head_to_write = '\t'.join(tmp_ex_head)
@@ -779,9 +849,9 @@ def write_out_indel_bed_dna(header_line, second_header, exon_headers, indels, ou
 			seq_length += chunk_length
 		out_indel_bed_dna.write('\t'.join(exon_headers[-1])) # Post-sequence	
 
-def sort_variants(proteome_file, variant_file, output_prefix, ref_prot):
+def sort_variants(proteome_file, variant_file, output_prefix, ref_prot, file_base = ''):
 	'''Goes through the variants and sorts them by type, writing out a bunch of intermediate files in the process.'''
-	global codon_map
+	global codon_map #KRC 1/27/2024 not used in this function
 	
 	# Grab all the variants and their locations within their genes
 	variants_map = {}
@@ -789,53 +859,68 @@ def sort_variants(proteome_file, variant_file, output_prefix, ref_prot):
 	line = f.readline()
 	while line:
 		spline = line.rstrip().split('\t')
-		if len(spline) > 1:
+		if len(spline) > 1: #KRC 1/27/2024 skips all lines with no variants
 			split_variants = spline[2].split(',')
 			variants_map[spline[0]] = variants_map.get(spline[0], []) + split_variants
 		line = f.readline()
 	f.close()
 	
 	# Write those to a file, just for kicks/error checking (might remove this later)
-	file_base = proteome_file.rsplit('/',1)[0]
-	w = open(variant_file+".SG.combined", 'w')
+	if file_base == '':					#KRC 1/28/2024 allow separate location of reference proteome and intermediate personalized files
+		file_base = proteome_file.rsplit('/',1)[0]
+	w = open(variant_file+".SG.combined", 'w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
 	for var in variants_map:
 		w.write("%s\t%s\n" % (var, ','.join(variants_map[var])))
 	w.close()
 	
 	# Open some files to write to. Right now, only looking at single AA changes.
 	# I hate these filenames. Do they actually mean anything?
-	out_aa = open(file_base+"/"+output_prefix+".bed.aa.var", 'w')
+	out_aa = open(file_base+"/"+output_prefix+".bed.aa.var", 'w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
 	# This one will basically just be that first line. Might want an extra line for each variant though, depends how it's used. Actually, almost certainly do.
-	out_aa_bed = open(file_base+"/"+output_prefix+".aa.var.bed", 'w')
+	out_aa_bed = open(file_base+"/"+output_prefix+".aa.var.bed", 'w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
 	# proteome.bed.dna, but with the variants included. Def want an extra line for each variant.
-	out_aa_bed_dna = open(file_base+"/"+output_prefix+".aa.var.bed.dna", 'w')
+	out_aa_bed_dna = open(file_base+"/"+output_prefix+".aa.var.bed.dna", 'w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
 	# Right now just proteome.bed.aa.var but with the non-AA variants. Doesn't do anything right now because I don't care about it very much.
-	out_indel = open(file_base+"/"+output_prefix+".bed.indel.var", 'w')
-	out_indel_bed = open(file_base+"/"+output_prefix+".indel.var.bed", 'w')
-	out_indel_bed_dna = open(file_base+"/"+output_prefix+".indel.var.bed.dna", 'w')
-	out_other = open(file_base+"/"+output_prefix+".bed.other.var", 'w')
-	
+	out_indel = open(file_base+"/"+output_prefix+".bed.indel.var", 'w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
+	out_indel_bed = open(file_base+"/"+output_prefix+".indel.var.bed", 'w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
+	out_indel_bed_dna = open(file_base+"/"+output_prefix+".indel.var.bed.dna", 'w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
+	out_other = open(file_base+"/"+output_prefix+".bed.other.var", 'w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
+
+	#initialize parsing variables
+	exon_seqs = exon_headers = exon_lengths = exon_offsets = []
+	sChr = name = strand = header_line = second_header = ''
+	start = end = exon_count = 0
 	f = open(proteome_file, 'r')
 	line = f.readline()
+	iGenesRead = 0
 	while line:
 		# Line type one: First gene header line
-		if line[:3] == 'chr':
+		if line[:3] == 'chr' and len(exon_seqs) > 0:
 			# Finish processing the previous gene - focus first on proteome.bed.aa.var
 			# Using a try/except block here to deal with the possibility of this being the first line
 			# There has to be a more graceful way to do that, right?
+			#KRC 1/27/2024, yes check if any variants for current gene before calling process_gene, speeds up somatic processing from 1hr to ~2min with Ensembl 108 /Gencode 42
+			iGenesRead += 1
+			#if ( iGenesRead % 10000 == 0 ):		print ( iGenesRead, ' genes read')#KRC 1/27/2024 troubleshooting speed before len(Lvariants) check
 			try:
-				changed_vars, aa_substs, indels = process_gene(header_line, second_header, exon_headers, exon_seqs, variants_map.get(name, []), ref_prot)
-				if changed_vars != []:
-					write_out_aa(name, changed_vars, aa_substs, out_aa)
-					write_out_aa_bed(header_line.split('\t'), changed_vars, out_aa_bed)
-					write_out_aa_bed_dna(header_line.split('\t'), second_header.split(), exon_headers, changed_vars, aa_substs, out_aa_bed_dna)
-				if indels != []:
-					# Make sure none of them are just removing intron stuff
-					indels = test_indels(exon_headers, indels)
-					# If there are any left...
+				#changed_vars, aa_substs, indels = process_gene(header_line, second_header, exon_headers, exon_seqs, variants_map.get(name, []), ref_prot)
+				#KRC 1/27/2024 Only cycle thru if variants for this gene
+				Lvariants = variants_map.get(name, [])
+				if len(Lvariants) > 0:
+					#KRC 1/27/2024 removed unused arguments
+					changed_vars, aa_substs, indels = process_gene(header_line, exon_seqs, Lvariants, ref_prot)
+					#print(name, Lvariants, changed_vars, indels)	#KRC 1/26/2024 TroubleShooting
+					if changed_vars != []:
+						write_out_aa(name, changed_vars, aa_substs, out_aa)
+						write_out_aa_bed(header_line.split('\t'), changed_vars, out_aa_bed)
+						write_out_aa_bed_dna(header_line.split('\t'), second_header.split(), exon_headers, changed_vars, aa_substs, out_aa_bed_dna)
 					if indels != []:
-						out_indel.write("%s\t%s\n" % (name, ','.join(indels)))
-						out_indel_bed.write("chr%s\t%d\t%d\t%s-indel\t1000\t%s\t%d\t%d\t%s\t%d\t%s\t%s\n" % (chr, start, end, name, strand, start, end, spline[-4], exon_count, ','.join(exon_lengths), ','.join(exon_offsets)))
+						# Make sure none of them are just removing intron stuff
+						indels = test_indels(exon_headers, indels)
+						# If there are any left...
+						if indels != []:
+							out_indel.write("%s\t%s\n" % (name, ','.join(indels)))
+							out_indel_bed.write("chr%s\t%d\t%d\t%s-indel\t1000\t%s\t%d\t%d\t%s\t%d\t%s\t%s\n" % (sChr, start, end, name, strand, start, end, spline[-4], exon_count, ','.join(exon_lengths), ','.join(exon_offsets)))
 						write_out_indel_bed_dna(header_line.split('\t'), second_header.split(), exon_headers, indels, out_indel_bed_dna)
 			except UnboundLocalError:
 				pass
@@ -844,7 +929,7 @@ def sort_variants(proteome_file, variant_file, output_prefix, ref_prot):
 			exon_seqs = []
 			header_line = line # To be printed to proteome.aa.var.bed, in some form
 			spline = line.rstrip().split('\t')
-			chr, start, end, name, strand, exon_count, exon_lengths, exon_offsets = spline[0].lstrip('chr'), int(spline[1]), int(spline[2]), spline[3], spline[5], int(spline[-3]), spline[-2].split(','), spline[-1].split(',')
+			sChr, start, end, name, strand, exon_count, exon_lengths, exon_offsets = spline[0].lstrip('chr'), int(spline[1]), int(spline[2]), spline[3], spline[5], int(spline[-3]), spline[-2].split(','), spline[-1].split(',')
 		# Line type two: Second gene header line
 		elif line[0] == '>':
 			second_header = line
@@ -856,7 +941,9 @@ def sort_variants(proteome_file, variant_file, output_prefix, ref_prot):
 		
 	# Do the last one
 	try:
-		changed_vars, aa_substs, indels = process_gene(header_line, second_header, exon_headers, exon_seqs, variants_map.get(name, []), ref_prot)
+		#KRC 1/27/2024 removed unused arguments
+		#changed_vars, aa_substs, indels = process_gene(header_line, second_header, exon_headers, exon_seqs, variants_map.get(name, []), ref_prot)
+		changed_vars, aa_substs, indels = process_gene(header_line, exon_seqs, variants_map.get(name, []), ref_prot)
 		if changed_vars != []:
 			write_out_aa(name, changed_vars, aa_substs, out_aa)
 			write_out_aa_bed(header_line.split('\t'), changed_vars, out_aa_bed)
@@ -911,7 +998,7 @@ def translate_seq(sequence, strand, return_all = False):
 	global codon_map
 	
 	if strand == '-':
-		translate_table = maketrans("ACGTacgt","TGCAtgca")
+		translate_table = str.maketrans("ACGTacgt","TGCAtgca")
 		sequence = sequence[::-1].translate(translate_table)
 	
 	# Didn't find any of these yet, just takes up time. Should probably have a check like this in there more formally.
@@ -942,8 +1029,8 @@ def translate_seq(sequence, strand, return_all = False):
 def calculate_chr_pos(map_section):
 	'''Finding the chromosomal position of a variant'''
 	gene_start, strand = int(map_section.split()[0][:-1]),map_section.split()[0][-1]
-	lengths = map(int,map_section.split()[1].rstrip(',').split(','))
-	starts = map(int,map_section.split()[2].rstrip(',').split(','))
+	lengths = list(map(int,map_section.split()[1].rstrip(',').split(',')))
+	starts = list(map(int,map_section.split()[2].rstrip(',').split(',')))
 	snp = map_section.split()[-1].split('-')[-1]
 	snp_pos = int(re.findall(r'\d+', snp)[0])
 	orig_nt, new_nt = snp.split(str(snp_pos))[0],snp.split(str(snp_pos))[-1]
@@ -1072,7 +1159,7 @@ def translate_saavs(log_dir, bed_file, logfile, ref_prot, seq_type='aa'):
 	
 	# The rest of it
 	f = open(log_dir+bed_file,'r')
-	out_fasta = open(log_dir+bed_file+".fasta",'w') # The original QUILTS writes two other files but they're just duplicates of proteome.aa.var.bed and proteome.aa.var.bed.dna, it seems. For now I'm leaving them out.
+	out_fasta = open(log_dir+bed_file+".fasta",'w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022 # The original QUILTS writes two other files but they're just duplicates of proteome.aa.var.bed and proteome.aa.var.bed.dna, it seems. For now I'm leaving them out.
 	line = f.readline()
 	prev_AA_subst = []
 	prev_gene = ''
@@ -1137,7 +1224,7 @@ def translate(log_dir, bed_file, logfile, seq_type):
 	
 	# The rest of it
 	f = open(log_dir+bed_file,'r')
-	out_fasta = open(log_dir+bed_file+".fasta",'w') # The original QUILTS writes two other files but they're just duplicates of proteome.aa.var.bed and proteome.aa.var.bed.dna, it seems. For now I'm leaving them out.
+	out_fasta = open(log_dir+bed_file+".fasta",'w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022 # The original QUILTS writes two other files but they're just duplicates of proteome.aa.var.bed and proteome.aa.var.bed.dna, it seems. For now I'm leaving them out.
 	line = f.readline()
 	sequence = ""
 	prev_AA_subst = []
@@ -1355,7 +1442,7 @@ def make_aa_peptide_fasta(log_dir, no_missed_cleavage):
 	f.close()
 	
 	f = open(log_dir+'proteome.bed.dna','r')
-	tryp_fasta = open(log_dir+'tryptic_proteome.fasta','w')
+	tryp_fasta = open(log_dir+'tryptic_proteome.fasta','w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
 	sequence = ''
 	extra_seq = ''
 	line = f.readline()
@@ -1418,7 +1505,7 @@ def make_indel_peptide_fasta(log_dir, logfile):
 	# Grab the indel variants
 	vars = {}
 	f = open(log_dir+'proteome.indel.var.bed.dna.fasta','r')
-	tryp_fasta = open(log_dir+'tryptic_proteome.fasta','a') # will append to the file
+	tryp_fasta = open(log_dir+'tryptic_proteome.fasta','a', newline='\n') #will append to the file, write unix LF when running on Windows KRC 7/26/2022 
 	line = f.readline()
 	while line:
 		indel = line.split()[-1].split(':')[0]
@@ -1487,16 +1574,18 @@ def convert_star_to_mapsplice(junc_dir):
 	if len(junc_files) == 0:
 		warnings.warn("Unable to find any .tab files in %s." % junc_dir)
 		return 1
-	w = open(junc_dir+'/junctions.txt','w')
+	w = open(junc_dir+'/junctions.txt','w', newline='\n') #write unix LF when running on Windows KRC 7/23/2022
 	count = 0
 	for fil in junc_files:
 		f = open(junc_dir+'/'+fil,'r')
 		for line in f.readlines():
 			spline = line.split()
 			chr = spline[0]
-			start = int(spline[1])-1
-			end = int(spline[2])+1
-			if spline[3] == '2':
+			#STAR defines the junction start/end as intronic bases, while many other software define them as exonic bases.
+			#
+			start = int(spline[1])-1	#first base of the intron (1-based), change to last of exon
+			end = int(spline[2])+1		#last base of the intron (1-based), change to first of exon
+			if spline[3] == '2':		#strand (0: undefined, 1: +, 2: -)
 				strand = '-'
 			else:
 				strand = '+'
@@ -1518,7 +1607,7 @@ def convert_tophat_to_mapsplice(junc_dir):
 	if len(junc_files) == 0:
 		warnings.warn("Unable to find any .bed files in %s." % junc_dir)
 		return 1
-	w = open(junc_dir+'/junctions.txt','w')
+	w = open(junc_dir+'/junctions.txt','w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
 	for fil in junc_files:
 		f = open(junc_dir+'/'+fil,'r')
 		for line in f.readlines():
@@ -1567,8 +1656,9 @@ def merge_junction_files(junc_dir, log_dir):
 			spline = line.split()
 			if len(spline) > 11:
 				chrm, end_ex_1, begin_ex_2, junc_num, num_observ, len_exons, begin_exons = spline[0], int(spline[1]), int(spline[2]), spline[3], int(spline[4]), spline[10].rstrip(','), spline[11].rstrip().rstrip(',')
-				splen_exons = map(int,len_exons.split(','))
-				spbegin_exons = map(int,begin_exons.split(','))
+				splen_exons = list(map(int,len_exons.split(',')))
+				spbegin_exons = list(map(int,begin_exons.split(',')))
+				#KRC 7/26/2022 modify these lines to use native STAR coordinates +/- 1
 				begin_intron = end_ex_1
 				end_intron = begin_ex_2
 				spbegin_exons[1] = spbegin_exons[1]-splen_exons[1]+splen_exons[0]-2 # -2 for some weird read_chr_bed nonsense
@@ -1586,7 +1676,7 @@ def merge_junction_files(junc_dir, log_dir):
 		f.close()
 		
 	# Time to write out our results
-	w = open(log_dir+'/merged-junctions.bed','w')
+	w = open(log_dir+'/merged-junctions.bed','w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
 	count = 0
 	for chr in sorted(num_observ_map.keys()):
 		for beg_int in sorted(num_observ_map[chr].keys()):
@@ -1601,7 +1691,7 @@ def merge_junction_files(junc_dir, log_dir):
 	w.close()
 							
 def filter_known_transcripts(transcriptome_bed, results_folder, logfile):
- 	'''Filters out spliceform transcripts that are known from those that aren't, and annotates the ones that can be annotated. Haven't done any serious testing on this yet, so...yeah, use at yr own risk'''
+	'''Filters out spliceform transcripts that are known from those that aren't, and annotates the ones that can be annotated. Haven't done any serious testing on this yet, so...yeah, use at yr own risk'''
 
 	junctions_model = {}
 	junctions_alternative = {}
@@ -1618,8 +1708,8 @@ def filter_known_transcripts(transcriptome_bed, results_folder, logfile):
 		for line in f.readlines():
 			spline = line.split('\t')
 			chrm, begin_exon, trans_id, strand, block_count, block_sizes, block_starts = spline[0], int(spline[1]), spline[3], spline[5], int(spline[9]), spline[10].rstrip(','), spline[11].rstrip().rstrip(',')
-			sizes = map(int, block_sizes.split(','))
-			starts = map(int, block_starts.split(','))
+			sizes = list(map(int, block_sizes.split(',')))
+			starts = list(map(int, block_starts.split(',')))
 			start = begin_exon
 
 			#Inclusive of (start+block lengths), EXCLUSIVE of (start+block starts) even 0
@@ -1652,10 +1742,10 @@ def filter_known_transcripts(transcriptome_bed, results_folder, logfile):
 		f.close()
 	
 	f = open(results_folder+'/merged-junctions.bed','r')
-	w = open(results_folder+'/merged-junctions.known.bed.log','w')
-	w2 = open(results_folder+'/merged-junctions.novel.bed','w')
-	w3 = open(results_folder+'/merged-junctions.alt.bed','w')
-	w4 = open(results_folder+'/merged-junctions.donor.bed','w')
+	w = open(results_folder+'/merged-junctions.known.bed.log','w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
+	w2 = open(results_folder+'/merged-junctions.novel.bed','w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
+	w3 = open(results_folder+'/merged-junctions.alt.bed','w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
+	w4 = open(results_folder+'/merged-junctions.donor.bed','w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
 	matches = 0
 	non_matches = 0
 	alt_match = 0
@@ -1666,8 +1756,8 @@ def filter_known_transcripts(transcriptome_bed, results_folder, logfile):
 		spline = line.split()
 		if len(spline) > 11:
 			chrm, beg_ex_1, end_ex_2, junc_num, num_observ, len_exons, begin_exons = spline[0], int(spline[1]), int(spline[2]), spline[3], int(spline[4]), spline[10], spline[11]
-			splen_exons = map(int,len_exons.split(','))
-			#spbegin_exons = map(int,begin_exons.split(','))
+			splen_exons = list(map(int,len_exons.split(',')))
+			#spbegin_exons = list(map(int,begin_exons.split(',')))
 			if num_observ >= 1:	
 				# Figure out whether it already exists in the database
 				end_ex_1 = beg_ex_1+splen_exons[0]
@@ -1678,8 +1768,10 @@ def filter_known_transcripts(transcriptome_bed, results_folder, logfile):
 						matches += 1
 						spline[3] = spline[3]+'-'+'-'.join(junctions_model[chrm][end_ex_1][beg_ex_2])
 						w.write('\t'.join(spline)+'\n')
-					elif end_ex_1 in junctions_alternative[chrm].keys() and beg_ex_2 in junctions_alternative[chrm][end_ex_1]:
-						# This is an unannotated splice site, but both donor and acceptor sites 
+					#elif end_ex_1 in junctions_alternative[chrm].keys() and beg_ex_2 in junctions_alternative[chrm][end_ex_1]:
+					#KRC 4/5/2023 ignore missing non-std chromosomes
+					elif chrm in junctions_alternative.keys() and end_ex_1 in junctions_alternative[chrm].keys() and beg_ex_2 in junctions_alternative[chrm][end_ex_1]:
+						# This is an unannotated splice site, but both donor and acceptor sites
 						# are known (so it's just skipped a couple of exons in one gene)
 						alt_match += 1
 						spline[3] = spline[3]+'-'+'-'.join(junctions_alternative[chrm][end_ex_1][beg_ex_2])
@@ -1736,11 +1828,11 @@ def filter_alternative_splices(log_dir, threshA, threshAN, threshN, logfile, ref
 		prot_lines[spline[3]] = line
 	f.close()
 	
-	untranslated = open(log_dir+'/merged-junctions.untranslated.bed.log','w')
-	under_threshold = open(log_dir+'/merged-junctions.under.threshold.bed.log','w')
+	untranslated = open(log_dir+'/merged-junctions.untranslated.bed.log','w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
+	under_threshold = open(log_dir+'/merged-junctions.under.threshold.bed.log','w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
 	
 	# Start with the known endpoints
-	w = open(log_dir+'/merged-junctions.alt.filtered.bed','w')
+	w = open(log_dir+'/merged-junctions.alt.filtered.bed','w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
 	f = open(log_dir+'/merged-junctions.alt.bed','r')
 	line = f.readline()
 	while line:
@@ -1768,7 +1860,7 @@ def filter_alternative_splices(log_dir, threshA, threshAN, threshN, logfile, ref
 	w.close()
 	
 	# Next: the conserved donor sites (this'll be harder)
-	w = open(log_dir+'/merged-junctions.donor.filtered.bed','w')
+	w = open(log_dir+'/merged-junctions.donor.filtered.bed','w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
 	f = open(log_dir+'/merged-junctions.donor.bed','r')
 	line = f.readline()
 	while line:
@@ -1796,7 +1888,7 @@ def filter_alternative_splices(log_dir, threshA, threshAN, threshN, logfile, ref
 	w.close()
 	
 	# Finally: novels (this only removes those under the read count threshold)
-	w = open(log_dir+'/merged-junctions.novel.filtered.bed','w')
+	w = open(log_dir+'/merged-junctions.novel.filtered.bed','w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
 	f = open(log_dir+'/merged-junctions.novel.bed','r')
 	line = f.readline()
 	while line:
@@ -1821,7 +1913,7 @@ def write_known_endpoints(junc_line, prot_line):
 	junc_name = spjunc[3].split('-')[0]
 	num_observ = int(spjunc[4])
 	len_exons = spjunc[10]
-	splen_exons = map(int,len_exons.split(','))
+	splen_exons = list(map(int,len_exons.split(',')))
 	beg_ex_1 = int(spjunc[1])
 	end_ex_2 = int(spjunc[2])
 	end_ex_1 = beg_ex_1+splen_exons[0]
@@ -1832,8 +1924,8 @@ def write_known_endpoints(junc_line, prot_line):
 	chr, start, end, prot_id, strand, block_count, block_sizes, block_starts = spline[0], int(spline[1]), int(spline[2]), spline[3], spline[5], int(spline[9]), spline[10].rstrip(','), spline[11].rstrip().rstrip(',')
 	spblock_sizes = block_sizes.split(',')
 	spblock_starts = block_starts.split(',')
-	int_block_sizes= map(int,spblock_sizes)
-	int_block_starts = map(int,spblock_starts)
+	int_block_sizes= list(map(int,spblock_sizes))
+	int_block_starts = list(map(int,spblock_starts))
 	
 	# Calculate: donor exon #, acceptor exon #, new block count/sizes/starts
 	donor = None
@@ -1870,7 +1962,7 @@ def write_donor_endpoint(junc_line, prot_line):
 	junc_name = spjunc[3].split('-')[0]
 	num_observ = int(spjunc[4])
 	len_exons = spjunc[10]
-	splen_exons = map(int,len_exons.split(','))
+	splen_exons = list(map(int,len_exons.split(',')))
 	beg_ex_1 = int(spjunc[1])
 	end_ex_2 = int(spjunc[2])
 	end_ex_1 = beg_ex_1+splen_exons[0]
@@ -1881,8 +1973,8 @@ def write_donor_endpoint(junc_line, prot_line):
 	chr, start, end, prot_id, strand, block_count, block_sizes, block_starts = spline[0], int(spline[1]), int(spline[2]), spline[3], spline[5], int(spline[9]), spline[10].rstrip(','), spline[11].rstrip().rstrip(',')
 	spblock_sizes = block_sizes.split(',')
 	spblock_starts = block_starts.split(',')
-	int_block_sizes= map(int,spblock_sizes)
-	int_block_starts = map(int,spblock_starts)
+	int_block_sizes= list(map(int,spblock_sizes))
+	int_block_starts = list(map(int,spblock_starts))
 	
 	# Calculate: donor exon #, acceptor exon #, new block count/sizes/starts
 	low_exon = None
@@ -1922,7 +2014,7 @@ def write_donor_endpoint(junc_line, prot_line):
 		new_block_count = block_count - high_exon + 2
 		new_block_sizes = str(splen_exons[0])+','+','.join(spblock_sizes[high_exon-1:])
 		int_block_starts = [x+add_to_start for x in int_block_starts]
-		spblock_starts = map(str,int_block_starts)
+		spblock_starts = list(map(str,int_block_starts))
 		new_block_starts = "0,"+','.join(spblock_starts[high_exon-1:])
 		new_junc_name = "-".join([prot_id, str(block_count-high_exon+1), str(num_observ), str(end_ex_1), str(beg_ex_2), junc_name])
 		
@@ -1991,7 +2083,7 @@ def translate_novels_with_trypsin(log_dir, bed_file, logfile):
 	
 	# The rest of it
 	f = open(log_dir+bed_file,'r')
-	out_fasta = open(log_dir+bed_file+".fasta",'w') # The original QUILTS writes two other files but they're just duplicates of proteome.aa.var.bed and proteome.aa.var.bed.dna, it seems. For now I'm leaving them out.
+	out_fasta = open(log_dir+bed_file+".fasta",'w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
 	line = f.readline()
 	sequence = ""
 	prev_AA_subst = []
@@ -2096,10 +2188,10 @@ def translate_novels_with_trypsin(log_dir, bed_file, logfile):
 def translate_novels(log_dir, bed_file, logfile):
 	'''In the bed file we read in, the sequences come in pairs - first sequence in the pair is the left gene, second is the right gene.'''
 	
-	translate_table = maketrans("ACGTacgt","TGCAtgca")
+	translate_table = str.maketrans("ACGTacgt","TGCAtgca")
 	
 	f = open(log_dir+bed_file,'r')
-	out_fasta = open(log_dir+bed_file+".fasta",'w') # The original QUILTS writes two other files but they're just duplicates of proteome.aa.var.bed and proteome.aa.var.bed.dna, it seems. For now I'm leaving them out.
+	out_fasta = open(log_dir+bed_file+".fasta",'w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
 	
 	line = 'a'
 	
@@ -2168,7 +2260,7 @@ def merge_and_filter_fusion_files(fusion_dir, result_dir):
 		return 1
 	
 	# Write a header line
-	w = open(result_dir+'/log/merged-fusions.txt','w')
+	w = open(result_dir+'/log/merged-fusions.txt','w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
 	f = open(fusion_dir+'/'+fusion_files[0],'r')
 	w.write(f.readline())
 	f.close()
@@ -2198,7 +2290,7 @@ def create_fusion_bed(result_dir):
 
 	f = open(result_dir+'/log/merged-fusions.txt','r')
 	#chr1	67000041	67000091	NP_001337147	0	+	67000041	67000091	0	1	50,	0,
-	w = open(result_dir+'/log/fusions.bed','w')
+	w = open(result_dir+'/log/fusions.bed','w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
 	
 	header = f.readline()
 	line = f.readline()
@@ -2235,10 +2327,10 @@ def create_fusion_bed(result_dir):
 def translate_fusions(result_dir):
 	'''In the bed file we read in, the sequences come in pairs - first sequence in the pair is the left gene, second is the right gene.'''
 	
-	translate_table = maketrans("ACGTacgt","TGCAtgca")
+	translate_table = str.maketrans("ACGTacgt","TGCAtgca")
 	
 	f = open(result_dir+'/log/fusions.bed.dna','r')
-	w = open(result_dir+'/log/fusions.fasta','w')
+	w = open(result_dir+'/log/fusions.fasta','w', newline='\n') #write unix LF when running on Windows KRC 7/26/2022
 	# We want to take the 4th line and every 5th line after that (that's the line with the 50 bases we want to keep, the rest is various buffers and metadata stuff)
 	second = False # Flag indicating we're on the right gene (as opposed to the left)
 	failstate = False # Flag indicating one of the genes didn't make it to the .bed.dna file, usually due to a missing chromosome file like chrUn_gl000228.fa.cmp1
@@ -2295,7 +2387,7 @@ def combine_output_fastas(out_dir):
 	for f in files:
 		if f.endswith('.fasta'):
 			with open(out_dir+'parts/'+f,'r') as src:
-				with open(out_dir+"variant_proteome.fasta", 'a') as dest:
+				with open(out_dir+"variant_proteome.fasta", 'a', newline='\n') as dest: #write unix LF when running on Windows KRC 7/26/2022
 					shutil.copyfileobj(src, dest)
 
 ### These functions are used everywhere.
@@ -2319,7 +2411,7 @@ def write_to_status(message):
 def raise_warning(warn_message):
 	'''The default warning is ugly! I'm making a better one. Okay I'm not, this is a waste of time right now.'''
 	my_warning = warnings.warn(warn_message)
-	print my_warning
+	print (my_warning)
 	
 def quit_if_no_variant_files(args):
 	if not (args.germline or args.somatic or args.junction or args.fusion):
@@ -2329,7 +2421,8 @@ def quit_if_no_variant_files(args):
 if __name__ == "__main__":
 	# Parse input, make sure we have at least one variant file.
 	args = parse_input_arguments()
-	script_dir = os.path.dirname(os.path.realpath(__file__)) # can this really be the best way to do this!?
+	#script_dir = os.path.dirname(os.path.realpath(__file__)) # can this really be the best way to do this!?
+	script_dir = '' #default is to run from within quilts dir KRC 7/24/2022
 
 	# Set up log/status files
 	output_dir = args.output_dir
@@ -2374,7 +2467,8 @@ if __name__ == "__main__":
 	# Possible but unlikely future work: rewrite the C file (still in C though) so it's more efficient?
 	# I dunno, it seems fine for now.
 	try:
-		check_call("%s/read_chr_bed %s/log/proteome.bed %s" % (script_dir, results_folder, args.genome), shell=True)
+		#check_call("%s/read_chr_bed %s/log/proteome.bed %s" % (script_dir, results_folder, args.genome), shell=True)
+		check_call("%s%s %s/log/proteome.bed %s" % (script_dir, sREAD_CHR_BED_EEXECUTABLE, results_folder, args.genome), shell=True)
 	except CalledProcessError:
 		raise SystemExit("ERROR: read_chr_bed didn't work - now we don't have a proteome.bed.dna file. Try recompiling read_chr_bed.c.\nAborting program.")
 	# Commented the above out for speed - it's slow, so for current testing purposes I'm just copying it from elsewhere
@@ -2395,11 +2489,12 @@ if __name__ == "__main__":
 			with open(f,'r') as src:
 				shutil.copyfileobj(src, dest)
 		dest.close()
+		write_to_status("Somatic and germline combined") #KRC 1/25/2024 only write this when actually combine
 	elif args.somatic:
 		shutil.copy(results_folder+"/log/proteome.bed.S.var", results_folder+"/log/proteome.bed.var")
 	elif args.germline:
 		shutil.copy(results_folder+"/log/proteome.bed.G.var", results_folder+"/log/proteome.bed.var")
-	write_to_status("Somatic and germline combined")
+	#write_to_status("Somatic and germline combined")
 
 	# Finish out the variants, if there are any	
 	if args.somatic or args.germline:
@@ -2455,7 +2550,7 @@ if __name__ == "__main__":
 			# Make a fasta out of the alternative splices with conserved exon boundaries
 			write_to_status("About to do a read_chr_bed")
 			try:
-				check_call("%s/read_chr_bed %s/log/merged-junctions.alt.filtered.bed %s" % (script_dir, results_folder, args.genome), shell=True)
+				check_call("%s%s %s/log/merged-junctions.alt.filtered.bed %s" % (script_dir, sREAD_CHR_BED_EEXECUTABLE,  results_folder, args.genome), shell=True)
 				# Don't know why this copies instead of moving. If I never use merged-junctions.filter.A.bed.dna again, just move it or have read_chr_bed output the alternative.bed.dna file instead.
 				shutil.copy(results_folder+'/log/merged-junctions.alt.filtered.bed.dna', results_folder+'/log/alternative.bed.dna')
 			except CalledProcessError:
@@ -2465,7 +2560,7 @@ if __name__ == "__main__":
 			# Make a fasta out of the alternative splices with conserved donor boundaries
 			write_to_status("About to do a read_chr_bed")
 			try:
-				check_call("%s/read_chr_bed %s/log/merged-junctions.donor.filtered.bed %s" % (script_dir, results_folder, args.genome), shell=True)
+				check_call("%s%s %s/log/merged-junctions.donor.filtered.bed %s" % (script_dir, sREAD_CHR_BED_EEXECUTABLE, results_folder, args.genome), shell=True)
 				# Don't know why this copies instead of moving.
 				shutil.copy(results_folder+'/log/merged-junctions.donor.filtered.bed.dna', results_folder+'/log/donor.bed.dna')
 			except CalledProcessError:
@@ -2473,28 +2568,32 @@ if __name__ == "__main__":
 			write_to_status("Done with read_chr_bed to create donor.bed.dna")
 			
 			# Now to tackle the novels...
-			write_to_status("About to do a read_chr_bed")
-			try:
-				check_call("%s/read_chr_bed %s/log/merged-junctions.novel.filtered.bed %s" % (script_dir, results_folder, args.genome), shell=True)
-				shutil.copy(results_folder+'/log/merged-junctions.novel.filtered.bed.dna', results_folder+'/log/novel.bed.dna')
-			except CalledProcessError:
-				warnings.warn("WARNING: read_chr_bed didn't work - now we don't have a merged-junctions.novel.filtered.bed.dna file. Will not have a fasta file of novel spliceforms. Try recompiling read_chr_bed.c.")
-			write_to_status("Done with read_chr_bed to create novel.bed.dna")
-		
+			if not args.junction_skipNovels == True:
+				write_to_status("About to do a read_chr_bed")
+				try:
+					check_call("%s%s %s/log/merged-junctions.novel.filtered.bed %s" % (script_dir, sREAD_CHR_BED_EEXECUTABLE, results_folder, args.genome), shell=True)
+					shutil.copy(results_folder+'/log/merged-junctions.novel.filtered.bed.dna', results_folder+'/log/novel.bed.dna')
+				except CalledProcessError:
+					warnings.warn("WARNING: read_chr_bed didn't work - now we don't have a merged-junctions.novel.filtered.bed.dna file. Will not have a fasta file of novel spliceforms. Try recompiling read_chr_bed.c.")
+				write_to_status("Done with read_chr_bed to create novel.bed.dna")
+
 			# Translating the junctions. Looks like it requires a slightly different function than the old translation function.
 			# Basically, though, can use the indel translation function (keep the exon with the variant and everything that comes after) for all of them except the ones where the exon boundaries are both new, in which case we need to do all six reading frames. And we saved those...where? notA?
 			# Single frame translations
 			translate(results_folder+"/log/", "alternative.bed.dna", logfile, 'juncA')
 			translate(results_folder+"/log/", "donor.bed.dna", logfile, 'juncAN')
+
 			# Six-frame translations
-			translate_novels(results_folder+"/log/", "novel.bed.dna", logfile)
+			if not args.junction_skipNovels == True:
+				translate_novels(results_folder+"/log/", "novel.bed.dna", logfile)
 		
 			# Move junctions to results folder
 			shutil.copy(results_folder+"/log/alternative.bed.dna.fasta", results_folder+"/fasta/parts/proteome.alternative_splices.fasta")
 			with open(results_folder+"/log/donor.bed.dna.fasta", 'r') as src:
-				with open(results_folder+"/fasta/parts/proteome.alternative_splices.fasta",'a') as dest:
+				with open(results_folder+"/fasta/parts/proteome.alternative_splices.fasta",'a', newline='\n') as dest: #write unix LF when running on Windows KRC 7/26/2022
 					shutil.copyfileobj(src, dest)
-			shutil.copy(results_folder+"/log/novel.bed.dna.fasta", results_folder+"/fasta/parts/proteome.novel_splices.fasta")
+			if not args.junction_skipNovels == True:
+				shutil.copy(results_folder+"/log/novel.bed.dna.fasta", results_folder+"/fasta/parts/proteome.novel_splices.fasta")
 			write_to_status("Translated alternative-splice junctions")
 	
 	if args.germline or args.somatic or args.junction:
@@ -2511,7 +2610,7 @@ if __name__ == "__main__":
 			create_fusion_bed(results_folder)
 			write_to_status("About to do a read_chr_bed")
 			try:
-				check_call("%s/read_chr_bed %s/log/fusions.bed %s" % (script_dir, results_folder, args.genome), shell=True)
+				check_call("%ssREAD_CHR_BED_EEXECUTABLE %s/log/fusions.bed %s" % (script_dir, results_folder, args.genome), shell=True)
 			except CalledProcessError:
 				warnings.warn("WARNING: read_chr_bed didn't work - now we don't have a fusions.bed.dna file. Will not be able to perform fusions. Try recompiling read_chr_bed.c.")
 			write_to_status("Done with read_chr_bed to fusions.bed.dna")
