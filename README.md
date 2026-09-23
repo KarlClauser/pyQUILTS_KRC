@@ -12,6 +12,7 @@ This fork of Emily Kawaler's pyQUILTS had 2 major motivations
   rather than have Quilts do it.
 
 Major Changes
+```
   •	Revised python code to run with Python 3 instead of v2.7
   •	Revised to run on Windows
   •	Recompiled C program for Windows, read_chr_bed_win64.exe, write LF not CRLF
@@ -23,7 +24,6 @@ Major Changes
   •	Output data for all samples in one directory
   •	Create intermediate results dir for running, then delete un-needed intermediate files when done.
   •	Added option: to Skip novel junctions (5’ junction not conserved) to eliminate later need to remove them.
-  •	Added option: to support sample manifest for mapping input file to output file.
   •	Accelerated SAAV processing from 1hr to 1 min/patient by adding check for matching protein acc number before entering function process_gene.
   •	Diminished storage needed for inputs. Revised to read STAR .SJ.out.tab.gz files w/o ungzipping
-
+```
