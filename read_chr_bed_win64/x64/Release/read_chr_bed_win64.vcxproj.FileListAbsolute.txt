@@ -1,0 +1,2 @@
+Z:\Projects\QUILTS\pyQUILTS_KRC\read_chr_bed_win64\read_chr_bed_win64\x64\Release\read_chr_bed_win64.exe
+Z:\Projects\QUILTS\pyQUILTS_KRC\read_chr_bed_win64\x64\Release\read_chr_bed_win64.exe
