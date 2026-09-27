@@ -1,4 +1,4 @@
-#Filename:	gunzip_dir.py
+#Filename:	gunzip_compress_dir.py
 #Purpose:	Replacement for gunzip_dir.pl/compress_chr_dir.pl that does not require the external executables gunzip, compress_chr
 #Author:	Karl Clauser
 #Created:	June 7, 2023
